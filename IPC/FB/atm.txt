@@ -1,0 +1,202 @@
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <sys/wait.h>
+#include <string.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <sys/queue.h>
+#include <stdbool.h>
+//semaphore
+#include <errno.h>
+#include <sys/ipc.h>
+#include <sys/sem.h>
+//signal
+#include <signal.h>
+//thread
+#include <pthread.h>
+pthread_t thread_id[5];
+uint8_t thread_count = 0;
+int32_t money = 0;
+#define USE_SEM
+#ifdef USE_SEM
+#define SEM_MODE 0666 /* rw(owner)-rw(group)-rw(other) permission */
+#define SEM_KEY 1122334455
+// uint32_t SEM_KEY = 1122334455;
+int sem;
+/* P () - returns 0 if OK; -1 if there was a problem */
+int P(int s)
+{
+    struct sembuf sop; /* the operation parameters */
+    sop.sem_num = 0;
+    /* access the 1st (and only) sem in the array */
+    sop.sem_op = -1;
+    /* wait..*/
+    sop.sem_flg = 0;
+    /* no special options needed */
+    if (semop(s, &sop, 1) < 0)
+    {
+        fprintf(stderr, "P(): semop failed: %s\n", strerror(errno));
+        return -1;
+    }
+    else
+    {
+        return 0;
+    }
+}
+/* V() - returns 0 if OK; -1 if there was a problem */
+int V(int s)
+{
+    struct sembuf sop; /* the operation parameters */
+    sop.sem_num = 0;
+    /* the 1st (and only) sem in the array */
+    sop.sem_op = 1;
+    /* signal */
+    sop.sem_flg = 0;
+    /* no special options needed */
+    if (semop(s, &sop, 1) < 0)
+    {
+        fprintf(stderr, "V(): semop failed: %s\n", strerror(errno));
+        return -1;
+    }
+    else
+    {
+        return 0;
+    }
+}
+#endif
+void signal_handler(int signum) {
+    printf("signal_handler: caught signal %d\n", signum);
+    if (signum == SIGINT)
+    {
+        printf("SIGINT\n");
+#ifdef USE_SEM
+        /* remove semaphore */
+        if (semctl(sem, 0, IPC_RMID, 0) < 0)
+        {
+            fprintf(stderr, "unable to remove sem %d\n", SEM_KEY);
+            exit(1);
+        }
+        printf("Semaphore %d has been remove\n", SEM_KEY);
+#endif
+        exit(1);
+    }
+}
+void* SocketHandler(void* lp)
+{
+    int ConnectFD = *(int *)lp;
+    uint8_t buf[12]={'\0'};
+    int pid = ConnectFD;
+    /* In the child process: */
+    while(1)
+    {
+        int rcv_count = 0;
+        rcv_count = recv(ConnectFD, buf, sizeof(buf), 0);
+        if (rcv_count <= 0)
+            continue;
+        if (strstr(buf, "deposit"))
+        {
+            char *p;
+            uint32_t amount = 0;
+            strtok(buf," ");
+            // printf("cut:%s-\n", strtok(buf," "));
+            p = strtok(NULL, " ");
+            amount = atoi(p);
+#ifdef USE_SEM
+                    /* acquire semaphore */
+                    P(sem);
+#endif
+            money += amount;
+            printf("%d: After deposit %d: %d\n", pid, amount, money);
+#ifdef USE_SEM
+                    /* release semaphore */
+                    V(sem);
+#endif
+        }
+        else if(strstr(buf, "withdraw"))
+        {
+            uint32_t amount = 0;
+            strtok(buf," ");
+            amount = atoi(strtok(NULL, ""));
+#ifdef USE_SEM
+                    /* acquire semaphore */
+                    P(sem);
+#endif
+            money -= amount;
+            printf("%d, After withdraw %d: %d\n", pid, amount, money);
+#ifdef USE_SEM
+                    /* release semaphore */
+                    V(sem);
+#endif
+        }
+    }
+}
+int main(int argc, char *argv[])
+{
+    struct sockaddr_in stSockAddr;
+    int SocketFD = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+    pid_t  cpid;
+    int reuseaddr = 1;
+    socklen_t reuseaddr_len;
+    int *ConnectFD;
+    if (signal(SIGINT, signal_handler) == SIG_ERR) {
+        printf("Failed to caught signal\n");
+    }
+#ifdef USE_SEM
+    /* create semaphore */
+    sem = semget(SEM_KEY, 1, IPC_CREAT | IPC_EXCL | SEM_MODE);
+    if (sem < 0)
+    {
+        fprintf(stderr, "Sem %d creation failed: %s\n", SEM_KEY,
+                strerror(errno));
+        exit(-1);
+    }
+    /* initial semaphore value to 1 (binary semaphore) */
+    if (semctl(sem, 0, SETVAL, 1) < 0)
+    {
+        fprintf(stderr, "Unable to initialize Sem: %s\n", strerror(errno));
+        exit(0);
+    }
+    printf("Semaphore %d has been created & initialized to 1\n", SEM_KEY);
+#endif
+    if(-1 == SocketFD)
+    {
+        perror("can not create socket");
+        exit(EXIT_FAILURE);
+    }
+    memset(&stSockAddr, 0, sizeof(struct sockaddr_in));
+    stSockAddr.sin_family = AF_INET;
+    stSockAddr.sin_port = htons(atoi(argv[1]));
+    stSockAddr.sin_addr.s_addr = INADDR_ANY;
+    reuseaddr_len = sizeof(reuseaddr);
+    setsockopt(SocketFD, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, reuseaddr_len);
+    if(-1 == bind(SocketFD,(const struct sockaddr *)&stSockAddr, sizeof(struct sockaddr_in)))
+    {
+        perror("error bind failed");
+        close(SocketFD);
+        exit(EXIT_FAILURE);
+    }
+    if(-1 == listen(SocketFD, 10))
+    {
+        perror("error listen failed");
+        close(SocketFD);
+        exit(EXIT_FAILURE);
+    }
+    for(;;)
+    {
+        ConnectFD = (int*)malloc(sizeof(int));
+        *ConnectFD = accept(SocketFD, NULL, NULL);
+        if(0 > ConnectFD)
+        {
+            perror("error accept failed");
+            close(SocketFD);
+            exit(EXIT_FAILURE);
+        }
+        pthread_create(&thread_id[thread_count],0,&SocketHandler, (void*)ConnectFD);
+        pthread_detach(thread_id[thread_count]);
+        thread_count++;
+    }
+    close(SocketFD);
+    return 0;
+}

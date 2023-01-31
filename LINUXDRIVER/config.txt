@@ -1,0 +1,16 @@
+#instructions
+insmod//install module
+mknod /dev/$name c(char device) major minor //using cat /proc/devices to find
+					   //major and minor number
+rmmod//remove module
+lsmod | grep "" //query related information
+
+#if printk not showing type { echo "7 7 7 7" > /proc/sys/kernel/printk } in terminal 
+
+//search deviece information/num is number of rows
+dmesg | tail -n
+sudo tail -f /var/log/syslog
+
+
+file xxx.ko //check file's attributes
+
